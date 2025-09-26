@@ -1,0 +1,26 @@
+name: dataviz-svc
+type: Load Balanced Web Service
+
+http:
+  path: /dataviz-svc
+  healthcheck: /dataviz-svc/
+
+image:
+  build: ./Dockerfile
+  port: 8080
+
+cpu: 256
+memory: 512
+platform: linux/x86_64
+count: 1
+exec: true
+network:
+  connect: true
+
+variables:
+  AWS_REGION: sa-east-1
+  S3_BUCKET: ai2c-genai-dev
+  S3_REPORTS_PREFIX: ai2c-reports/reports
+  PORT: 8080
+  KEY: 68792c47e0b9668ef6f6ab5e
+  BASE_PATH: /dataviz-svc/
