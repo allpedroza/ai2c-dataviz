@@ -111,26 +111,41 @@ except Exception:
     STOPWORDS = set()
 
 # ==============================
-# 0) Estilo Plotly (clean/modern)
+# 0) Estilo Plotly (AI2C style)
 # ==============================
 pio.templates["modern"] = go.layout.Template(
     layout=go.Layout(
         paper_bgcolor="white",
         plot_bgcolor="white",
         font=dict(
-            family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial",
-            size=13, color="#2B2D31"
+            family="Poppins, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif",
+            size=13,
+            color="#111111"  # ink
         ),
-        title=dict(x=0, xanchor="left", font=dict(size=18, color="#111827")),
+        title=dict(x=0, xanchor="left", font=dict(size=18, color="#111111")),
         margin=dict(l=40, r=20, t=60, b=40),
-        colorway=["#6366F1","#10B981","#F59E0B","#EF4444","#8B5CF6","#EC4899","#06B6D4"],
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, bgcolor="rgba(255,255,255,0)"),
-        xaxis=dict(showgrid=False, zeroline=False, showline=True, linecolor="#E5E7EB", linewidth=1, ticks="outside", tickcolor="#E5E7EB"),
-        yaxis=dict(showgrid=True, gridcolor="#F3F4F6", gridwidth=1, zeroline=False, showline=False),
-        hoverlabel=dict(bgcolor="white", font=dict(color="#111827"), bordercolor="#E5E7EB"),
+        # Paleta AI2C (laranjas + apoio)
+        colorway=["#FF9800", "#FFB74D", "#FFA726", "#FB8C00", "#EF6C00", "#6C757D", "#111111"],
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="left", x=0,
+            bgcolor="rgba(255,255,255,0)"
+        ),
+        xaxis=dict(
+            showgrid=False, zeroline=False,
+            showline=True, linecolor="#ECECEC", linewidth=1,
+            ticks="outside", tickcolor="#ECECEC"
+        ),
+        yaxis=dict(
+            showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+            zeroline=False, showline=False
+        ),
+        hoverlabel=dict(bgcolor="white", font=dict(color="#111111"), bordercolor="#ECECEC"),
     )
 )
 pio.templates.default = "modern"
+
 
 # ==============================
 # 1) Config & CLI
@@ -583,28 +598,84 @@ app.index_string = """
     <title>Analytics Dashboard</title>
     {%favicon%}
     {%css%}
-    <style>
-      :root {
-        --brand-blue:#003f88; --brand-mid:#0077b6; --ink:#212529; --muted:#6c757d;
-        --card-bg:#ffffff; --page-bg:#f8f9fa; --line:#e0e0e0;
-        --primary:#6366F1; --success:#10B981; --warning:#F59E0B; --danger:#EF4444;
-      }
-      body { background:var(--page-bg); font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial; color:var(--ink); }
-      .card { border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,.05); }
-      .navbar { border-bottom:1px solid var(--line); }
-      .dash-card{ background:var(--card-bg); border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,.05); border:1px solid #eef0f2; transition: all 0.3s ease; }
-      .dash-card:hover { box-shadow:0 4px 20px rgba(0,0,0,.08); }
-      .muted{color:var(--muted)}
-      .muted-box{ display:flex;align-items:center;padding:16px;border:1px dashed #e5e7eb;border-radius:8px;color:var(--muted);background:#fafafa; }
-      .ctrl-grid{ display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom: 12px;}
-      label { font-size: 0.875rem; margin-bottom: 6px; color: #374151; }
-      .btn { border-radius: 8px; font-weight: 500; transition: all 0.2s ease; }
-      .btn:hover { transform: translateY(-1px); }
-      @media (max-width: 992px){ .ctrl-grid{grid-template-columns:1fr} }
-      .nav-tabs .nav-link { border-radius: 8px 8px 0 0; font-weight: 500; color: var(--muted); border: none; padding: 12px 24px; }
-      .nav-tabs .nav-link.active { background: white; color: var(--primary); border-bottom: 3px solid var(--primary); }
-      .nav-tabs .nav-link:hover { color: var(--ink); }
-    </style>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;700&display=swap');
+
+  /* ===============================
+     Paleta/variáveis – AI2C style
+     =============================== */
+  :root{
+    --brand:#FF9800;
+    --ink:#111111;
+    --muted:#6c757d;
+    --page-bg:#F7F7F7;
+    --card-bg:#FFFFFF;
+    --line:#ECECEC;
+    --success:#16A34A;
+    --danger:#EF4444;
+  }
+
+  /* Base */
+  *{box-sizing:border-box}
+  body{
+    background:var(--page-bg);
+    color:var(--ink);
+    font-family:'Poppins',system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial,sans-serif;
+  }
+
+  /* Navbar/Tabs */
+  .navbar { border-bottom:1px solid var(--line); background:var(--card-bg); }
+  .nav-tabs .nav-link{
+    border-radius:12px 12px 0 0;
+    font-weight:600; color:var(--muted);
+    border:none; padding:12px 24px;
+  }
+  .nav-tabs .nav-link.active{
+    background:var(--card-bg); color:var(--ink);
+    border-bottom:3px solid var(--brand);
+  }
+  .nav-tabs .nav-link:hover{ color:var(--ink) }
+
+  /* Cards/KPIs (aplica nos seus painéis/containers) */
+  .dash-card{
+    background:var(--card-bg);
+    border-radius:16px;
+    border:1px solid var(--line);
+    box-shadow:0 2px 10px rgba(0,0,0,.05);
+    transition: box-shadow .2s ease, transform .05s ease;
+  }
+  .dash-card:hover{ box-shadow:0 4px 16px rgba(0,0,0,.08) }
+
+  /* Controles (grid e botões com “pílula” laranja) */
+  .ctrl-grid{
+    display:grid; grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:16px; margin-bottom:12px;
+  }
+  @media (max-width: 992px){ .ctrl-grid{grid-template-columns:1fr} }
+  label{ font-size:.9rem; margin-bottom:6px; color:#374151; }
+
+  .btn{
+    border-radius:999px; font-weight:600;
+    border:1.5px solid var(--brand);
+    background:#fff; color:var(--ink);
+  }
+  .btn:hover{ box-shadow:0 4px 12px rgba(0,0,0,.08) }
+  .btn:active{ transform:translateY(1px) }
+  .btn-primary{
+    background:var(--brand); border-color:var(--brand); color:var(--ink);
+  }
+
+  /* Badges e estados */
+  .badge{ border-radius:999px; }
+  .text-muted{ color:var(--muted)!important; }
+
+  /* Empty state */
+  .muted-box{
+    display:flex; align-items:center; gap:6px;
+    padding:16px; border:1px dashed var(--line);
+    border-radius:12px; color:var(--muted); background:#FAFAFA;
+  }
+</style>
   </head>
   <body>
     {%app_entry%}
