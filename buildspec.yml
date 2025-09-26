@@ -1,0 +1,38 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: "sa-east-1"
+    ECR_REPO_NAME: "ai2c-dash-dataviz"
+    IMAGE_TAG: "latest"         # ou use um carimbo de tempo; pode ser sobrescrito ao iniciar o build
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --region $AWS_REGION ecr get-login-password | docker login --username AWS --password-stdin $(aws ecr describe-repositories --repository-names $ECR_REPO_NAME --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "000000000000.dkr.ecr.$AWS_REGION.amazonaws.com")
+      - |
+        REPO_URI=$(aws ecr describe-repositories --repository-names $ECR_REPO_NAME --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null || true)
+        if [ -z "$REPO_URI" ]; then
+          echo "ECR repo not found. Creating $ECR_REPO_NAME..."
+          aws ecr create-repository --repository-name $ECR_REPO_NAME --region $AWS_REGION >/dev/null
+          REPO_URI=$(aws ecr describe-repositories --repository-names $ECR_REPO_NAME --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text)
+        fi
+      - echo "REPO_URI=$REPO_URI"
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - |
+        docker buildx create --use --name cbuilder || docker buildx use cbuilder
+        docker buildx build \
+          --platform linux/amd64 \
+          -t $REPO_URI:$IMAGE_TAG \
+          --push \
+          .
+  post_build:
+    commands:
+      - echo Build completed on `date`
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: yes
