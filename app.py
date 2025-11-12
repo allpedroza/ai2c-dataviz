@@ -576,7 +576,7 @@ def get_qtype_for_question_with_meta(env_resolved: str, qid: str, series: pd.Ser
 
 
 
-def build_state(df: pd.DataFrame, env_resolved: Optional[str] = None, key: Optional[str] = None) -> Dict:
+def build_state(df: pd.DataFrame, env_resolved: Optional[str] = None, key: Optional[str] = None, is_raw_mode: bool = False) -> Dict:
     """Cria um dicionário de estado a partir de um DataFrame + metadados do questionário."""
     if df.empty:
         return {
@@ -585,13 +585,16 @@ def build_state(df: pd.DataFrame, env_resolved: Optional[str] = None, key: Optio
             "QDESC_MAP": {},
             "ALLOWED_SEGMENT_COLS": [],
             "QTYPE_MAP": {},
-            "QOPTIONS_MAP": {}
+            "QOPTIONS_MAP": {},
+            "IS_RAW_MODE": is_raw_mode
         }
 
     def _allowed_segment_cols(d: pd.DataFrame) -> list[str]:
         cols = []
+        # No modo raw, excluir também colunas de metadata e answer
+        exclude_set = NON_SEGMENTABLE.copy() if not is_raw_mode else NON_SEGMENTABLE | {"question_type", "available_options", "answer"}
         for c in d.columns:
-            if c in NON_SEGMENTABLE or is_pii(c) or high_cardinality(d, c):
+            if c in exclude_set or is_pii(c) or high_cardinality(d, c):
                 continue
             cols.append(c)
         return sorted(cols)
@@ -614,12 +617,12 @@ def build_state(df: pd.DataFrame, env_resolved: Optional[str] = None, key: Optio
     }
 
     qtype_map, qopts_map = {}, {}
-    
+
     if env_resolved and key:
         meta = load_questionnaire_meta(env_resolved, key)
         qtype_map = (meta.get("qtype_map") or {}).copy()
         qopts_map = (meta.get("options_map") or {}).copy()
-        
+
         # Enriquece qdesc_map com títulos do questionário
         for qid, title in (meta.get("title_map") or {}).items():
             if title and qid in qdesc_map:
@@ -634,6 +637,7 @@ def build_state(df: pd.DataFrame, env_resolved: Optional[str] = None, key: Optio
         "ALLOWED_SEGMENT_COLS": _allowed_segment_cols(df),
         "QTYPE_MAP": qtype_map,
         "QOPTIONS_MAP": qopts_map,
+        "IS_RAW_MODE": is_raw_mode
     }
 
 
@@ -692,7 +696,7 @@ def load_df_for_key(env_resolved: str, key: str) -> pd.DataFrame:
             raise FileNotFoundError(f"Cubo de dados não encontrado para key='{key}' no ambiente='{env_resolved}'")
 
     df = read_csv_robust(local_path)
-    
+
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"Colunas obrigatórias ausentes no CUBE: {missing}")
@@ -721,6 +725,116 @@ def load_df_for_key(env_resolved: str, key: str) -> pd.DataFrame:
 
     DF_CACHE[k] = df
     return df
+
+
+# Cache separado para dados brutos (answers + questionnaire)
+RAW_DF_CACHE: Dict[Tuple[str, str], pd.DataFrame] = {}
+
+def _s3_download_answers_to_tmp(env_resolved: str, key: str) -> Optional[str]:
+    """Baixa s3://.../{key}-answers.csv para /tmp e retorna caminho local, ou None se falhar."""
+    env_bucket = resolve_bucket(env_resolved)
+    base_bucket = S3_BUCKET_BASE
+    s3_key = f"{S3_INPUTS_PREFIX}/{key}-answers.csv"
+
+    local_dir = os.getenv("DATA_DIR", "/tmp")
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, f"{key}-answers.csv")
+
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+
+    # Tenta primeiro no bucket do ambiente, depois no base
+    for bucket in [env_bucket, base_bucket]:
+        try:
+            s3_uri = f"s3://{bucket}/{s3_key}"
+            print(f"[S3] Baixando {s3_uri} para {local_path}")
+            s3.download_file(bucket, s3_key, local_path)
+            print(f"[S3] Download de {s3_uri} concluído.")
+            return local_path
+        except Exception as e:
+            print(f"[S3] Falha ao baixar s3://{bucket}/{s3_key}: {e}")
+            continue
+
+    return None
+
+
+def load_raw_df_for_key(env_resolved: str, key: str) -> pd.DataFrame:
+    """
+    Carrega dados BRUTOS (answers.csv + questionnaire metadata) para visualização sem IA.
+
+    Estrutura esperada do answers.csv:
+    - respondent_id, question_id, answer, date_of_response
+    - Opcionalmente: questionnaire_id, survey_id, outras colunas demográficas
+
+    Retorna DataFrame com:
+    - Todas as colunas do answers.csv
+    - question_description (do metadata)
+    - question_type (do metadata)
+    """
+    k = (env_resolved, key, "raw")
+    if k in RAW_DF_CACHE:
+        return RAW_DF_CACHE[k]
+
+    # 1. Baixar answers.csv
+    local_path = _s3_download_answers_to_tmp(env_resolved, key)
+    if not local_path or not os.path.exists(local_path):
+        fallback_path = f"{key}-answers.csv"
+        print(f"Download do S3 falhou. Tentando fallback local: {fallback_path}")
+        if os.path.exists(fallback_path):
+            local_path = fallback_path
+        else:
+            raise FileNotFoundError(f"Arquivo answers não encontrado para key='{key}' no ambiente='{env_resolved}'")
+
+    df = read_csv_robust(local_path)
+    print(f"[RAW] Answers carregado: {len(df)} registros, {len(df.columns)} colunas")
+
+    # 2. Validar colunas mínimas
+    required_raw = ["question_id", "answer"]
+    missing = [c for c in required_raw if c not in df.columns]
+    if missing:
+        raise ValueError(f"Colunas obrigatórias ausentes no answers.csv: {missing}")
+
+    # 3. Normalizar colunas comuns
+    for c in ["question_id", "answer"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).map(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # Aplicar fix de mojibake
+    if "answer" in df.columns:
+        df["answer"] = df["answer"].map(fix_mojibake)
+
+    # Processar date_of_response se existir
+    if "date_of_response" in df.columns:
+        df["date_of_response"] = pd.to_datetime(df["date_of_response"], errors="coerce")
+
+    # 4. Carregar metadata do questionário e fazer join
+    meta = load_questionnaire_meta(env_resolved, key)
+    qtype_map = meta.get("qtype_map", {})
+    title_map = meta.get("title_map", {})
+    options_map = meta.get("options_map", {})
+
+    # Adicionar colunas de metadata
+    df["question_description"] = df["question_id"].map(title_map).fillna("")
+    df["question_type"] = df["question_id"].map(qtype_map).fillna("unknown")
+
+    # Criar coluna de opções disponíveis (para single/multiple choice)
+    df["available_options"] = df["question_id"].map(lambda qid: "|".join(options_map.get(str(qid), [])))
+
+    RAW_DF_CACHE[k] = df
+    print(f"[RAW] DataFrame final: {len(df)} registros, colunas: {list(df.columns)}")
+    return df
+
+
+def check_ai_data_available(env_resolved: str, key: str) -> bool:
+    """
+    Verifica se dados enriquecidos com IA (_analytics_cube.csv) existem para a key.
+    Retorna True se existir, False caso contrário.
+    """
+    try:
+        load_df_for_key(env_resolved, key)
+        return True
+    except Exception as e:
+        print(f"[CHECK_AI] Dados de IA não disponíveis para key={key}: {e}")
+        return False
 
 # ==============================
 # 5) Funções de Análise e Helpers
@@ -1157,6 +1271,22 @@ app.index_string = """
     border-radius:12px; color:var(--muted);
     background:#FAFAFA;
   }
+  .mode-toggle-btn{
+    border-radius:8px !important;
+    font-weight:500;
+    transition: all 0.2s ease;
+  }
+  .mode-toggle-btn:not(.btn-primary){
+    border-color: var(--line) !important;
+    color: var(--muted) !important;
+    background: white !important;
+  }
+  .mode-toggle-btn.btn-primary{
+    background: var(--brand) !important;
+    border-color: var(--brand) !important;
+    color: var(--ink) !important;
+    font-weight: 600;
+  }
 </style>
   </head>
   <body>
@@ -1182,8 +1312,46 @@ def health_root():
 def health_base():
     return {"status": "ok", "service": "dataviz-svc"}, 200
 
-# Navbar
-header = dbc.Navbar()
+# Navbar com toggle de modo
+header = dbc.Navbar(
+    dbc.Container([
+        dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.H4("Analytics Dashboard", className="mb-0", style={"color": "var(--ink)"}),
+                ], style={"display": "flex", "alignItems": "center", "gap": "12px"})
+            ], width="auto"),
+            dbc.Col([
+                html.Div([
+                    html.Label("Modo de visualização:", className="me-2 mb-0", style={"fontSize": "0.9rem", "color": "var(--muted)"}),
+                    dbc.ButtonGroup([
+                        dbc.Button(
+                            ["📋 Dados Brutos"],
+                            id="btn-mode-raw",
+                            color="light",
+                            outline=True,
+                            size="sm",
+                            className="mode-toggle-btn",
+                            n_clicks=0
+                        ),
+                        dbc.Button(
+                            ["🤖 Análise Inteligente"],
+                            id="btn-mode-ai",
+                            color="primary",
+                            outline=False,
+                            size="sm",
+                            className="mode-toggle-btn",
+                            n_clicks=0
+                        ),
+                    ], size="sm"),
+                ], style={"display": "flex", "alignItems": "center", "gap": "8px"})
+            ], width="auto", className="ms-auto"),
+        ], align="center", className="w-100")
+    ], fluid=True),
+    color="white",
+    className="navbar mb-3",
+    style={"padding": "1rem"}
+)
 
 # Tabs
 tabs = dbc.Tabs(
@@ -1205,6 +1373,8 @@ app.layout = dbc.Container([
     dcc.Location(id="url", refresh=False),
     dcc.Store(id="current-env"),
     dcc.Store(id="current-key"),
+    dcc.Store(id="current-mode", data="ai"),  # 'raw' ou 'ai'
+    dcc.Store(id="ai-data-available", data=True),  # Flag se dados AI existem
     tabs,
     html.Div(id="tab-content", className="mt-3"),
 ], fluid=True)
@@ -1526,6 +1696,94 @@ def set_current_key(search):
 
 
 # ==============================
+# 9.5) Callbacks – Controle de Modo (Raw vs AI)
+# ==============================
+
+@dash.callback(
+    Output("ai-data-available", "data"),
+    Output("current-mode", "data", allow_duplicate=True),
+    Input("current-key", "data"),
+    Input("current-env", "data"),
+    prevent_initial_call=False
+)
+def detect_initial_mode(key, env_resolved):
+    """
+    Detecta se dados de IA estão disponíveis e seta o modo inicial.
+    Prioridade: AI se disponível, senão Raw.
+    """
+    if not key:
+        return False, "raw"
+
+    env_resolved = normalize_env(env_resolved or "dev")
+    ai_available = check_ai_data_available(env_resolved, key)
+
+    # Iniciar em modo AI se disponível, senão raw
+    initial_mode = "ai" if ai_available else "raw"
+
+    print(f"[MODE] AI disponível: {ai_available}, Modo inicial: {initial_mode}")
+    return ai_available, initial_mode
+
+
+@dash.callback(
+    Output("current-mode", "data", allow_duplicate=True),
+    Output("btn-mode-raw", "outline"),
+    Output("btn-mode-raw", "color"),
+    Output("btn-mode-ai", "outline"),
+    Output("btn-mode-ai", "color"),
+    Input("btn-mode-raw", "n_clicks"),
+    Input("btn-mode-ai", "n_clicks"),
+    State("ai-data-available", "data"),
+    prevent_initial_call=True
+)
+def toggle_mode(raw_clicks, ai_clicks, ai_available):
+    """
+    Alterna entre modos Raw e AI quando usuário clica nos botões.
+    """
+    from dash import ctx
+
+    if not ctx.triggered_id:
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+    # Detectar qual botão foi clicado
+    clicked = ctx.triggered_id
+
+    if clicked == "btn-mode-raw":
+        # Ativar modo Raw
+        return "raw", False, "light", True, "primary"
+    elif clicked == "btn-mode-ai":
+        # Verificar se AI está disponível
+        if not ai_available:
+            # Não permitir mudar para AI se não houver dados
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        # Ativar modo AI
+        return "ai", True, "light", False, "primary"
+
+    return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+
+@dash.callback(
+    Output("btn-mode-raw", "outline", allow_duplicate=True),
+    Output("btn-mode-raw", "color", allow_duplicate=True),
+    Output("btn-mode-ai", "outline", allow_duplicate=True),
+    Output("btn-mode-ai", "color", allow_duplicate=True),
+    Output("btn-mode-ai", "disabled"),
+    Input("current-mode", "data"),
+    Input("ai-data-available", "data"),
+    prevent_initial_call=False
+)
+def update_button_styles(mode, ai_available):
+    """
+    Atualiza estilos dos botões baseado no modo atual e disponibilidade de dados AI.
+    """
+    if mode == "raw":
+        # Modo Raw ativo
+        return False, "light", True, "primary", not ai_available
+    else:
+        # Modo AI ativo
+        return True, "light", False, "primary", not ai_available
+
+
+# ==============================
 # 10) Callbacks – Pivot principal
 # ==============================
 
@@ -1547,15 +1805,22 @@ def set_current_key(search):
   Input("pv-dim-filter-values","value"),
   Input("current-key","data"),
   Input("current-env","data"),
+  Input("current-mode","data"),
 )
 
 def update_pivot(rows, cols, metric, agg, chart, ds, de, pv_qid, pv_use_answer, pv_bins,
-                 dim_filter_col, dim_filter_vals, key, env_resolved):
+                 dim_filter_col, dim_filter_vals, key, env_resolved, mode):
     try:
         key = key or os.getenv("KEY","")
         env_resolved = normalize_env(env_resolved or os.getenv("APP_DEFAULT_ENV","dev"))
+        mode = mode or "ai"
 
-        df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        # Carregar dados baseado no modo
+        if mode == "raw":
+            df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        else:
+            df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+
         if df.empty:
             return empty_state("Sem dados."), go.Figure(), empty_state("Sem dados.")
         d = df.copy()
@@ -1690,12 +1955,18 @@ def sync_dim_filter_col(rows, cols):
     Input("pv-daterange", "end_date"),
     Input("current-key","data"),
     Input("current-env","data"),
+    Input("current-mode","data"),
 )
-def sync_dim_filter_values(dim_col, pv_qid, pv_use_answer, pv_bins, ds, de, key, env_resolved):
+def sync_dim_filter_values(dim_col, pv_qid, pv_use_answer, pv_bins, ds, de, key, env_resolved, mode):
     key = key or os.getenv("KEY","")
     env_resolved = normalize_env(env_resolved or "dev")
+    mode = mode or "ai"
 
-    df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+    # Carregar dados baseado no modo
+    if mode == "raw":
+        df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+    else:
+        df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
 
     if not dim_col or df.empty:
         return [], None
@@ -1735,24 +2006,43 @@ def sync_dim_filter_values(dim_col, pv_qid, pv_use_answer, pv_bins, ds, de, key,
     Input("main-tabs", "active_tab"),
     Input("current-key", "data"),
     Input("current-env", "data"),
+    Input("current-mode", "data"),
     prevent_initial_call=False
 )
-def render_tab(active, key, env_resolved):
+def render_tab(active, key, env_resolved, mode):
     try:
         key = key or os.getenv("KEY", "")
         env_resolved = normalize_env(env_resolved or "dev")
+        mode = mode or "ai"
+
+        # Badge para indicar modo ativo
+        mode_badge = dbc.Badge(
+            f"{'📋 Modo: Dados Brutos' if mode == 'raw' else '🤖 Modo: Análise Inteligente'}",
+            color="info" if mode == "raw" else "success",
+            className="mb-3"
+        )
 
         try:
-            df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+            # Carregar dados baseado no modo
+            if mode == "raw":
+                df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+            else:
+                df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
         except Exception as e:
-            msg = f"Erro ao carregar CUBE para env={env_resolved} key={key}: {e}"
+            msg = f"Erro ao carregar dados para env={env_resolved} key={key} mode={mode}: {e}"
             print("[render_tab]", msg)
-            return html.Div(msg, className="alert alert-danger")
+            return html.Div([
+                mode_badge,
+                html.Div(msg, className="alert alert-danger")
+            ])
 
-        state = build_state(df, env_resolved=env_resolved, key=key)
+        state = build_state(df, env_resolved=env_resolved, key=key, is_raw_mode=(mode == "raw"))
 
         if df.empty:
-            return html.Div("Estamos aguardando dados para gerar insights sobre seu caso de uso...", className="alert alert-warning")
+            return html.Div([
+                mode_badge,
+                html.Div("Estamos aguardando dados para gerar insights sobre seu caso de uso...", className="alert alert-warning")
+            ])
 
         if active == "questions":
             cards = [
@@ -1766,30 +2056,43 @@ def render_tab(active, key, env_resolved):
                 )
                 for _, r in state["questions_df"].iterrows()
             ]
-            return dbc.Row(cards) if cards else empty_state("Sem perguntas para exibir.")
+            content = dbc.Row(cards) if cards else empty_state("Sem perguntas para exibir.")
+            return html.Div([mode_badge, content])
 
         if active == "pivot":
             try:
                 ui = pivot_controls(df, state)
-                return html.Div([ui])
+                return html.Div([mode_badge, ui])
             except Exception as e:
                 import traceback
                 print("[pivot_controls ERROR]", repr(e))
                 traceback.print_exc()
-                return html.Div(f"Erro ao montar Pivot: {e}", className="alert alert-danger")
+                return html.Div([
+                    mode_badge,
+                    html.Div(f"Erro ao montar Pivot: {e}", className="alert alert-danger")
+                ])
 
         if active == "raw":
-            cols_show = [c for c in df.columns if c not in {"orig_answer","survey_id"} and not is_pii(c)]
+            # No modo raw, ocultar colunas de IA
+            if mode == "raw":
+                cols_show = [c for c in df.columns if c not in {
+                    "orig_answer", "survey_id", "category", "topic", "sentiment", "intention",
+                    "question_type", "available_options"
+                } and not is_pii(c)]
+            else:
+                cols_show = [c for c in df.columns if c not in {"orig_answer","survey_id"} and not is_pii(c)]
+
             if "respondent_id" in cols_show:
                 cols_show = ["respondent_id"] + [c for c in cols_show if c != "respondent_id"]
             return html.Div([
+                mode_badge,
                 html.H5("📋 Dados brutos"),
                 raw_controls(df),
                 html.Div(id="raw-table")
             ])
 
-        return html.Div("Selecione uma aba.", className="text-muted")
-    
+        return html.Div([mode_badge, html.Div("Selecione uma aba.", className="text-muted")])
+
     except Exception as e:
         app.server.logger.exception("Erro no callback render_tab")
         return _error_box("Erro no callback render_tab", e)
@@ -1815,11 +2118,18 @@ def toggle_collapse(n, is_open):
     Input({"type":"q-segcol","qid":MATCH}, "value"),
     Input("current-key","data"),
     Input("current-env","data"),
+    Input("current-mode","data"),
 )
-def update_seg_values_per_q(seg_col, key, env_resolved):
+def update_seg_values_per_q(seg_col, key, env_resolved, mode):
     key = key or os.getenv("KEY","")
     env_resolved = normalize_env(env_resolved or "dev")
-    df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+    mode = mode or "ai"
+
+    # Carregar dados baseado no modo
+    if mode == "raw":
+        df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+    else:
+        df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
 
     if not seg_col or df.empty or seg_col not in df.columns:
         return [], None
@@ -1913,9 +2223,10 @@ def update_drill_state(main_click, cat_click, clear_clicks, curr, fig_id):
     State({"type":"q-fig","qid":MATCH}, "id"),
     Input("current-key","data"),
     Input("current-env","data"),
+    Input("current-mode","data"),
 )
 
-def update_question_graph(seg_col, seg_vals, qfilter, qdrill, fig_id, key, env_resolved):
+def update_question_graph(seg_col, seg_vals, qfilter, qdrill, fig_id, key, env_resolved, mode):
     # 10 saídas SEMPRE
     main_fig   = go.Figure()
     cat_fig    = go.Figure()
@@ -1937,7 +2248,13 @@ def update_question_graph(seg_col, seg_vals, qfilter, qdrill, fig_id, key, env_r
     try:
         key = key or os.getenv("KEY","")
         env_resolved = normalize_env(env_resolved or "dev")
-        df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        mode = mode or "ai"
+
+        # Carregar dados baseado no modo
+        if mode == "raw":
+            df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        else:
+            df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
 
         if not fig_id or "qid" not in fig_id:
             return (main_fig, fig_wrap_style, cat_fig, topics_fig, answers_fig,
@@ -2055,6 +2372,49 @@ def update_question_graph(seg_col, seg_vals, qfilter, qdrill, fig_id, key, env_r
             main_fig.update_yaxes(showgrid=False, ticks="", showticklabels=False)
 
         elif base_qtype == "open-ended":
+            # No modo raw, não temos colunas de IA (category, sentiment, topic)
+            # Então exibimos apenas agregação simples das respostas
+            if mode == "raw":
+                # Mostrar apenas wordcloud ou top respostas
+                fig_wrap_style = {"display":"none"}
+                main_fig = go.Figure()
+                sent_cards = html.Div()
+                cat_fig = go.Figure()
+                cat_style = {"display": "none"}
+                topics_fig = go.Figure()
+                topics_style = {"display": "none"}
+
+                # Gráfico de top respostas (texto livre)
+                if "answer" in sub.columns and not sub.empty:
+                    s_ans = sub["answer"].dropna().astype(str).str.strip()
+                    s_ans = s_ans[s_ans.ne("") & ~s_ans.str.lower().isin({"nan", "none", "null"})]
+                    if not s_ans.empty:
+                        vc = s_ans.value_counts().head(20)
+                        if not vc.empty:
+                            df_bar = pd.DataFrame({"Resposta": vc.index.astype(str), "Qtde": vc.values})
+                            answers_fig = px.bar(df_bar, x="Resposta", y="Qtde", title="Top 20 Respostas")
+                            answers_fig.update_traces(text=df_bar["Qtde"], textposition="outside", cliponaxis=False)
+                            answers_fig = create_fig_style(answers_fig, x="Resposta", y="Qtde")
+                            answers_fig = responsive_axis(answers_fig, labels=df_bar["Resposta"].tolist())
+                            answers_style = {"marginTop": "12px"}
+                        else:
+                            answers_fig = go.Figure()
+                            answers_style = {"display": "none"}
+                    else:
+                        answers_fig = go.Figure()
+                        answers_style = {"display": "none"}
+                else:
+                    answers_fig = go.Figure()
+                    answers_style = {"display": "none"}
+
+                clear_style = {"display": "none"}
+
+                return (
+                    main_fig, fig_wrap_style, cat_fig, topics_fig, answers_fig,
+                    cat_style, topics_style, answers_style, clear_style, sent_cards
+                )
+
+            # Modo AI: mostrar sentiment cards e categorias
             # esconder o gráfico principal
             fig_wrap_style = {"display":"none"}
             main_fig = go.Figure()
@@ -2130,9 +2490,10 @@ def show_filter_pill(qfilter):
     State({"type": "raw-filter", "col": ALL}, "id"),
     State("current-key", "data"),
     State("current-env", "data"),
+    State("current-mode", "data"),
     prevent_initial_call=False,
 )
-def update_raw_table(filter_values, filter_ids, key, env_resolved):
+def update_raw_table(filter_values, filter_ids, key, env_resolved, mode):
     try:
         # Mapeia colunas => valores escolhidos
         active_filters = {}
@@ -2151,7 +2512,13 @@ def update_raw_table(filter_values, filter_ids, key, env_resolved):
 
         # carrega DF
         env_resolved = normalize_env(env_resolved or "dev")
-        df = load_df_for_key(env_resolved, key or os.getenv("KEY","")) if key or os.getenv("KEY","") else pd.DataFrame()
+        mode = mode or "ai"
+        key = key or os.getenv("KEY","")
+
+        if mode == "raw":
+            df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        else:
+            df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
 
         if df.empty:
             return html.Div("Sem dados.", className="alert alert-warning")
@@ -2163,13 +2530,21 @@ def update_raw_table(filter_values, filter_ids, key, env_resolved):
                 d = d[d[col].astype(str).isin(sel)]
 
         # escolhe colunas seguras (sem PII)
-        cols_show = [c for c in d.columns if c not in {"orig_answer","survey_id"} and not is_pii(c)]
+        # No modo raw, ocultar colunas de IA
+        if mode == "raw":
+            cols_show = [c for c in d.columns if c not in {
+                "orig_answer", "survey_id", "category", "topic", "sentiment", "intention",
+                "question_type", "available_options"
+            } and not is_pii(c)]
+        else:
+            cols_show = [c for c in d.columns if c not in {"orig_answer","survey_id"} and not is_pii(c)]
+
         if "respondent_id" in cols_show:
             cols_show = ["respondent_id"] + [c for c in cols_show if c != "respondent_id"]
 
         sample = d[cols_show].copy() if cols_show else d.head(0)
         return dbc.Table.from_dataframe(sample.head(300), striped=True, bordered=True, hover=True, size="sm", responsive=True)
-    
+
     except Exception as e:
         app.server.logger.exception("Erro no callback update_raw_table")
         return _error_box("Erro no callback update_raw_table", e)
@@ -2193,14 +2568,21 @@ def update_raw_table(filter_values, filter_ids, key, env_resolved):
     State("pv-daterange", "end_date"),
     Input("current-key","data"),
     Input("current-env","data"),
+    State("current-mode","data"),
     prevent_initial_call=True
 )
-def pivot_drill(clickData, rows, cols, pv_qid, pv_use_answer, pv_bins, ds, de, key, env_resolved):
+def pivot_drill(clickData, rows, cols, pv_qid, pv_use_answer, pv_bins, ds, de, key, env_resolved, mode):
     try:
         key = key or os.getenv("KEY","")
         env_resolved = normalize_env(env_resolved or "dev")
+        mode = mode or "ai"
 
-        df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        # Carregar dados baseado no modo
+        if mode == "raw":
+            df = load_raw_df_for_key(env_resolved, key) if key else pd.DataFrame()
+        else:
+            df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
+
         if not clickData or df.empty:
             return False, "", ""
         d = df.copy()
