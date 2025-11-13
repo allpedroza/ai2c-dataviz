@@ -86,6 +86,10 @@ S3_REPORTS_PREFIX = os.getenv("S3_REPORTS_PREFIX", "ai2c-reports/reports").strip
 S3_INPUTS_PREFIX = os.getenv("S3_INPUTS_PREFIX", "integrador-inputs").strip().strip("/")
 AWS_REGION = os.getenv("AWS_REGION", "sa-east-1")
 
+# Modo local: se definido, carrega arquivos do diretório local sem usar S3
+LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes", "sim")
+LOCAL_DATA_DIR = os.getenv("LOCAL_DATA_DIR", "local_data")
+
 #. s3://ai2c-genai/integrador-inputs/6864dcc63d7d7502472acc62-questionnaires.csv
 
 
@@ -254,6 +258,20 @@ def s3_path_for_key(env_resolved: str, key: str) -> str:
 
 def _s3_download_to_tmp(env_resolved: str, key: str) -> Optional[str]:
     """Baixa s3://.../{key}_analytics_cube.csv p/ /tmp e retorna caminho local, ou None se falhar."""
+    # MODO LOCAL: Tenta carregar do diretório local primeiro
+    if LOCAL_MODE:
+        local_candidates = [
+            os.path.join(LOCAL_DATA_DIR, f"{key}_analytics_cube.csv"),
+            f"{key}_analytics_cube.csv",  # raiz do projeto
+        ]
+        for local_path in local_candidates:
+            if os.path.exists(local_path):
+                print(f"[LOCAL] Carregando cube de {local_path}")
+                return local_path
+        print(f"[LOCAL] Nenhum arquivo local encontrado para key={key}")
+        return None
+
+    # MODO S3: Download do S3
     s3_uri = s3_path_for_key(env_resolved, key)
     _, _, rest = s3_uri.partition("s3://")
     bucket, _, keypath = rest.partition("/")
@@ -287,6 +305,28 @@ def read_csv_robust(path: str) -> pd.DataFrame:
 
 
 def _s3_read_text(bucket: str, key: str) -> Optional[str]:
+    # MODO LOCAL: Tenta ler do diretório local primeiro
+    if LOCAL_MODE:
+        # key geralmente é algo como "integrador-inputs/employee-survey-demo-questionnaires.csv"
+        # vamos tentar tanto o caminho completo quanto apenas o nome do arquivo
+        filename = key.split("/")[-1]  # pega só o nome do arquivo
+        local_candidates = [
+            os.path.join(LOCAL_DATA_DIR, filename),
+            filename,  # raiz do projeto
+        ]
+        for local_path in local_candidates:
+            if os.path.exists(local_path):
+                try:
+                    with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    print(f"[LOCAL] Lido {local_path}. Tamanho: {len(content)} bytes.")
+                    return content
+                except Exception as e:
+                    print(f"[LOCAL] Erro ao ler {local_path}: {e}")
+        print(f"[LOCAL] Arquivo não encontrado localmente: {key}")
+        return None
+
+    # MODO S3: Lê do S3
     try:
         s3 = boto3.client("s3", region_name=AWS_REGION)
         obj = s3.get_object(Bucket=bucket, Key=key)
