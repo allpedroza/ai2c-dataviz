@@ -1280,6 +1280,13 @@ app.index_string = """
   input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before {
     transform: translateX(24px);
   }
+  /* Estado ativo do toggle (quando clicado) */
+  .toggle-slider.active {
+    background-color: #1976d2;
+  }
+  .toggle-slider.active:before {
+    transform: translateX(24px);
+  }
   .toggle-switch:hover .toggle-slider {
     box-shadow: 0 0 8px rgba(25, 118, 210, 0.3);
   }
@@ -1324,18 +1331,26 @@ mode_selector = html.Div([
             html.Span("📊 Dados Processados", id="label-processed",
                      style={"fontSize": "0.95rem", "fontWeight": "500", "color": "#1976d2"}),
             html.Div([
-                dcc.Checklist(
-                    id="view-mode-switch",
-                    options=[{"label": "", "value": "survey"}],
-                    value=[],
-                    inputStyle={"display": "none"},
+                # Botão invisível que captura cliques
+                html.Button(
+                    id="toggle-button",
+                    n_clicks=0,
+                    style={
+                        "position": "absolute",
+                        "width": "48px",
+                        "height": "24px",
+                        "opacity": "0",
+                        "cursor": "pointer",
+                        "zIndex": "10",
+                        "border": "none",
+                        "background": "transparent",
+                    }
                 ),
-                html.Label(
-                    html.Div(className="toggle-slider"),
-                    htmlFor="view-mode-switch",
-                    className="toggle-switch",
-                ),
-            ], style={"display": "inline-block", "margin": "0 16px", "verticalAlign": "middle"}),
+                # Visual do switch
+                html.Div([
+                    html.Div(id="toggle-circle", className="toggle-slider"),
+                ], className="toggle-switch", style={"position": "relative"}),
+            ], style={"display": "inline-block", "margin": "0 16px", "verticalAlign": "middle", "position": "relative"}),
             html.Span("📋 Pesquisa", id="label-survey",
                      style={"fontSize": "0.95rem", "fontWeight": "400", "color": "#666"}),
         ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
@@ -1710,22 +1725,33 @@ def set_current_key(search):
     Output("current-mode", "data"),
     Output("label-processed", "style"),
     Output("label-survey", "style"),
-    Input("view-mode-switch", "value"),
+    Output("toggle-circle", "className"),
+    Input("toggle-button", "n_clicks"),
+    State("current-mode", "data"),
     prevent_initial_call=False
 )
-def set_current_mode(switch_value):
-    # Checklist retorna lista: [] = processed, ["survey"] = survey
-    is_survey = "survey" in (switch_value or [])
-    mode = "survey" if is_survey else "processed"
+def set_current_mode(n_clicks, current_mode):
+    # Toggle entre modos a cada clique (cliques ímpares = survey, pares = processed)
+    # Se n_clicks é None (carregamento inicial), começa em "processed"
+    if n_clicks is None or n_clicks == 0:
+        mode = "processed"
+    else:
+        # Toggle: se estava em processed, vai para survey e vice-versa
+        mode = "survey" if current_mode == "processed" else "processed"
+
+    is_survey = (mode == "survey")
 
     # Estilos para labels (destacar o modo ativo)
     style_active = {"fontSize": "0.95rem", "fontWeight": "600", "color": "#1976d2"}
     style_inactive = {"fontSize": "0.95rem", "fontWeight": "400", "color": "#999"}
 
+    # ClassName do toggle (adiciona "active" quando em modo survey)
+    toggle_class = "toggle-slider active" if is_survey else "toggle-slider"
+
     if is_survey:
-        return mode, style_inactive, style_active
+        return mode, style_inactive, style_active, toggle_class
     else:
-        return mode, style_active, style_inactive
+        return mode, style_active, style_inactive, toggle_class
 
 @dash.callback(
     Output("mode-description", "children"),
