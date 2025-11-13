@@ -1272,15 +1272,6 @@ def health_base():
 # Navbar
 header = dbc.Navbar()
 
-# Tabs
-tabs = dbc.Tabs(
-    [
-        dbc.Tab(label="Análise por Pergunta", tab_id="questions"),
-        dbc.Tab(label="Análises personalizadas", tab_id="pivot"),
-        dbc.Tab(label="Dados Brutos", tab_id="raw"),
-    ], id="main-tabs", active_tab="questions"
-)
-
 # Modal de drill (Pivot)
 modal_drill = dbc.Modal([
     dbc.ModalHeader(dbc.ModalTitle(id="pv-drill-title")),
@@ -1316,7 +1307,7 @@ app.layout = dbc.Container([
     dcc.Store(id="current-key"),
     dcc.Store(id="current-mode", data="processed"),
     mode_selector,
-    tabs,
+    html.Div(id="tabs-container"),  # Tabs dinâmicas baseadas no modo
     html.Div(id="tab-content", className="mt-3"),
 ], fluid=True)
 
@@ -1428,7 +1419,7 @@ def to_date_str(x):
     except Exception:
         return None
  
-def pivot_controls(df: pd.DataFrame, state: Dict):
+def pivot_controls(df: pd.DataFrame, state: Dict, mode: str = "processed"):
     """UI da aba Pivot – cartões do mesmo tamanho, pergunta1 e sentiment pré-selecionados."""
     if df.empty:
         return empty_state("Sem dados para montar a pivot.")
@@ -1441,7 +1432,16 @@ def pivot_controls(df: pd.DataFrame, state: Dict):
     ])
 
     # dimensões seguras
-    dims_base = (state.get("ALLOWED_SEGMENT_COLS") or []) + ["sentiment", "category", "topic"]
+    # Modo "processed": inclui variáveis de IA (sentiment, category, topic, intention)
+    # Modo "survey": apenas colunas originais (sem variáveis geradas pela IA)
+    if mode == "processed":
+        # Comportamento ORIGINAL: inclui todas as variáveis de IA
+        dims_base = (state.get("ALLOWED_SEGMENT_COLS") or []) + ["sentiment", "category", "topic"]
+    else:
+        # Modo "survey": exclui variáveis geradas pela IA
+        ai_generated_cols = ["sentiment", "category", "topic", "intention", "confidence_level", "orig_answer"]
+        dims_base = [c for c in (state.get("ALLOWED_SEGMENT_COLS") or []) if c not in ai_generated_cols]
+
     dims = sorted(list(set([c for c in dims_base if c not in numeric_cols])))
     dims_options = [{"label": c, "value": c} for c in dims] + [
         {"label": "Resposta (da pergunta selecionada)", "value": "__pv_answer__"}
@@ -1498,7 +1498,7 @@ def pivot_controls(df: pd.DataFrame, state: Dict):
                     html.Label("Linhas (index)", className="fw-bold"),
                     dcc.Dropdown(
                         id="pv-rows", options=dims_options, multi=True,
-                        value=["sentiment"],  # default para não ficar vazio
+                        value=["sentiment"] if mode == "processed" and "sentiment" in dims else (dims[:1] if dims else []),
                         placeholder="Escolha 1–2 dimensões…"
                     )
                 ]),
@@ -1608,6 +1608,33 @@ def pivot_controls(df: pd.DataFrame, state: Dict):
 # 9) Callbacks – Captura ENV e KEY da URL
 # ==============================
 from urllib.parse import parse_qs
+
+@dash.callback(
+    Output("tabs-container", "children"),
+    Input("current-mode", "data"),
+    prevent_initial_call=False
+)
+def render_tabs(mode):
+    """Renderiza tabs dinamicamente baseado no modo selecionado."""
+    mode = mode or "processed"
+
+    if mode == "processed":
+        # Modo Dados Processados: Análise por Pergunta + Pivot (SEM Dados Brutos)
+        return dbc.Tabs(
+            [
+                dbc.Tab(label="Análise por Pergunta", tab_id="questions"),
+                dbc.Tab(label="Análises personalizadas", tab_id="pivot"),
+            ], id="main-tabs", active_tab="questions"
+        )
+    else:
+        # Modo Pesquisa: Análise por Pergunta + Pivot Simplificado + Dados Brutos
+        return dbc.Tabs(
+            [
+                dbc.Tab(label="Análise por Pergunta", tab_id="questions"),
+                dbc.Tab(label="Análises personalizadas", tab_id="pivot"),
+                dbc.Tab(label="Dados Brutos", tab_id="raw"),
+            ], id="main-tabs", active_tab="questions"
+        )
 
 @dash.callback(
     Output("current-env", "data"),
@@ -1996,11 +2023,55 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
         ])
 
     elif active_tab == "pivot":
-        return html.Div([
-            html.H4("Análises personalizadas", className="mb-3"),
-            html.P("Análises personalizadas não disponíveis no modo Pesquisa.", className="text-muted"),
-            html.P("Alterne para 'Dados Processados' para acessar esta funcionalidade.", className="text-muted"),
-        ], className="alert alert-info")
+        # Transforma dados RAW do answers em formato adequado para pivot
+        # Formato: cada linha é uma resposta a uma pergunta
+        rows = []
+        for idx, row in df_raw.iterrows():
+            for qcol in question_cols:
+                answer = row[qcol]
+                if pd.notna(answer) and str(answer).strip():
+                    row_data = {
+                        "respondent_id": str(idx),
+                        "question_id": qcol,
+                        "answer": str(answer).strip(),
+                        "question_description": qcol,
+                    }
+                    # Adiciona colunas de metadados disponíveis
+                    for meta_col in meta_cols:
+                        if meta_col in df_raw.columns:
+                            row_data[meta_col] = row[meta_col]
+                    rows.append(row_data)
+
+        if not rows:
+            return html.Div("Sem dados para análise pivot.", className="alert alert-warning")
+
+        df_pivot = pd.DataFrame(rows)
+
+        # Cria state simplificado para pivot
+        questions_df = pd.DataFrame({
+            "question_id": question_cols,
+            "question_description": question_cols
+        })
+
+        # Colunas permitidas para segmentação (exclui PII e colunas geradas)
+        allowed_cols = [c for c in df_pivot.columns
+                       if c not in ["respondent_id", "question_id", "answer", "question_description"]
+                       and not is_pii(c)]
+
+        state_pivot = {
+            "questions_df": questions_df,
+            "ALLOWED_SEGMENT_COLS": allowed_cols,
+            "stats": {}
+        }
+
+        try:
+            ui = pivot_controls(df_pivot, state_pivot, mode="survey")
+            return html.Div([ui])
+        except Exception as e:
+            import traceback
+            print("[pivot_controls survey ERROR]", repr(e))
+            traceback.print_exc()
+            return html.Div(f"Erro ao montar Pivot: {e}", className="alert alert-danger")
 
     return html.Div("Selecione uma aba.", className="text-muted")
 
@@ -2065,7 +2136,7 @@ def render_tab(active, key, env_resolved, mode):
 
         if active == "pivot":
             try:
-                ui = pivot_controls(df, state)
+                ui = pivot_controls(df, state, mode)
                 return html.Div([ui])
             except Exception as e:
                 import traceback
