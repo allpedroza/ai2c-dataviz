@@ -2142,7 +2142,25 @@ def update_question_graph(seg_col, seg_vals, qfilter, qdrill, fig_id, key, env_r
                 clear_style,                  # style botão limpar
                 sent_cards                    # cards de sentimento
             )
-        
+
+        # Retorno padrão para todos os outros tipos (numeric, categorical, multiple)
+        # Botão "Limpar filtros" quando houver filtro local
+        has_local_filter = bool(qfilter and (qfilter.get("category") or qfilter.get("topic")))
+        clear_style = {"display": "inline-block", "marginBottom": "12px"} if has_local_filter else {"display": "none"}
+
+        return (
+            main_fig,                     # q-fig
+            fig_wrap_style,               # q-fig-wrap style
+            cat_fig,                      # q-catfig
+            topics_fig,                   # q-topicsfig
+            answers_fig,                  # q-answers
+            cat_style,                    # style catfig
+            topics_style,                 # style topicsfig
+            answers_style,                # style answersfig
+            clear_style,                  # style botão limpar
+            sent_cards                    # cards de sentimento
+        )
+
     except Exception as e:
         app.server.logger.exception("Erro no callback update_question_graph")
         empty = go.Figure()
