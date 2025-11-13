@@ -1244,6 +1244,45 @@ app.index_string = """
     border-radius:12px; color:var(--muted);
     background:#FAFAFA;
   }
+  /* Toggle Switch Elegante */
+  .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+    cursor: pointer;
+  }
+  .toggle-slider {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    border-radius: 24px;
+    transition: 0.3s;
+  }
+  .toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    border-radius: 50%;
+    transition: 0.3s;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  }
+  input[type="checkbox"]:checked + .toggle-switch .toggle-slider {
+    background-color: #1976d2;
+  }
+  input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before {
+    transform: translateX(24px);
+  }
+  .toggle-switch:hover .toggle-slider {
+    box-shadow: 0 0 8px rgba(25, 118, 210, 0.3);
+  }
 </style>
   </head>
   <body>
@@ -1278,27 +1317,32 @@ modal_drill = dbc.Modal([
     dbc.ModalBody(id="pv-drill-content"),
 ], id="pv-drill-modal", size="xl", is_open=False)
 
-# Toggle de modo: Dados Processados vs Pesquisa
-mode_selector = dbc.Card([
-    dbc.CardBody([
+# Toggle de modo: Dados Processados vs Pesquisa (Switch elegante)
+mode_selector = html.Div([
+    html.Div([
         html.Div([
-            html.Label("Modo de Visualização:", className="fw-bold me-3"),
-            dbc.RadioItems(
-                id="view-mode",
-                className="btn-group",
-                inputClassName="btn-check",
-                labelClassName="btn btn-outline-primary",
-                labelCheckedClassName="active",
-                options=[
-                    {"label": "📊 Dados Processados", "value": "processed"},
-                    {"label": "📋 Pesquisa (Respostas Brutas)", "value": "survey"},
-                ],
-                value="processed",
-            ),
-        ], className="d-flex align-items-center"),
-        html.Div(id="mode-description", className="mt-2 text-muted", style={"fontSize": "0.9rem"}),
-    ], className="py-2")
-], className="mb-3")
+            html.Span("📊 Dados Processados", id="label-processed",
+                     style={"fontSize": "0.95rem", "fontWeight": "500", "color": "#1976d2"}),
+            html.Div([
+                dcc.Checklist(
+                    id="view-mode-switch",
+                    options=[{"label": "", "value": "survey"}],
+                    value=[],
+                    inputStyle={"display": "none"},
+                ),
+                html.Label(
+                    html.Div(className="toggle-slider"),
+                    htmlFor="view-mode-switch",
+                    className="toggle-switch",
+                ),
+            ], style={"display": "inline-block", "margin": "0 16px", "verticalAlign": "middle"}),
+            html.Span("📋 Pesquisa", id="label-survey",
+                     style={"fontSize": "0.95rem", "fontWeight": "400", "color": "#666"}),
+        ], style={"display": "flex", "alignItems": "center", "gap": "4px"}),
+        html.Div(id="mode-description", className="mt-2 text-muted",
+                style={"fontSize": "0.85rem", "maxWidth": "800px"}),
+    ], style={"padding": "16px 0"}),
+], style={"borderBottom": "1px solid #e0e0e0", "marginBottom": "24px"})
 
 app.layout = dbc.Container([
     header,
@@ -1664,15 +1708,28 @@ def set_current_key(search):
 
 @dash.callback(
     Output("current-mode", "data"),
-    Input("view-mode", "value"),
+    Output("label-processed", "style"),
+    Output("label-survey", "style"),
+    Input("view-mode-switch", "value"),
     prevent_initial_call=False
 )
-def set_current_mode(mode_value):
-    return mode_value or "processed"
+def set_current_mode(switch_value):
+    # Checklist retorna lista: [] = processed, ["survey"] = survey
+    is_survey = "survey" in (switch_value or [])
+    mode = "survey" if is_survey else "processed"
+
+    # Estilos para labels (destacar o modo ativo)
+    style_active = {"fontSize": "0.95rem", "fontWeight": "600", "color": "#1976d2"}
+    style_inactive = {"fontSize": "0.95rem", "fontWeight": "400", "color": "#999"}
+
+    if is_survey:
+        return mode, style_inactive, style_active
+    else:
+        return mode, style_active, style_inactive
 
 @dash.callback(
     Output("mode-description", "children"),
-    Input("view-mode", "value"),
+    Input("current-mode", "data"),
     prevent_initial_call=False
 )
 def update_mode_description(mode):
@@ -1911,24 +1968,38 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
             n_responses = len(answers)
             n_unique = answers.nunique()
 
-            # Calcula distribuição
+            # Calcula distribuição com percentuais
             vc = answers.value_counts().head(10)
 
-            # Cria gráfico de barras simples
+            # Cria gráfico de barras com percentuais
             if not vc.empty:
-                df_bar = pd.DataFrame({"Resposta": vc.index.astype(str), "Contagem": vc.values})
-                fig = px.bar(df_bar, x="Resposta", y="Contagem", title=f"Top 10 respostas")
-                fig.update_traces(text=df_bar["Contagem"], textposition="outside")
+                df_bar = pd.DataFrame({
+                    "Resposta": vc.index.astype(str),
+                    "Contagem": vc.values,
+                    "Percentual": (vc.values / n_responses * 100).round(1)
+                })
+                # Texto mostra contagem + percentual
+                df_bar["Texto"] = df_bar.apply(lambda row: f"{int(row['Contagem'])} ({row['Percentual']}%)", axis=1)
+
+                fig = px.bar(df_bar, x="Resposta", y="Contagem")
+                fig.update_traces(
+                    text=df_bar["Texto"],
+                    textposition="outside",
+                    marker_color="#1976d2"
+                )
                 fig.update_layout(
                     xaxis_title="",
                     yaxis_title="Qtde",
                     showlegend=False,
-                    margin=dict(l=10, r=10, t=40, b=10)
+                    margin=dict(l=10, r=10, t=10, b=10),  # t=10 ao invés de 40 (sem título)
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
                 )
                 # Rotaciona labels se tiverem mais de 20 caracteres
                 max_len = df_bar["Resposta"].str.len().max()
                 if max_len > 20:
                     fig.update_xaxes(tickangle=-45)
+                fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
             else:
                 fig = go.Figure()
 
