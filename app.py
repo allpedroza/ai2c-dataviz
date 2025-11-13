@@ -1704,7 +1704,7 @@ def set_current_key(search):
     Output("current-mode", "data", allow_duplicate=True),
     Input("current-key", "data"),
     Input("current-env", "data"),
-    prevent_initial_call=False
+    prevent_initial_call='initial_duplicate'
 )
 def detect_initial_mode(key, env_resolved):
     """
@@ -1769,7 +1769,7 @@ def toggle_mode(raw_clicks, ai_clicks, ai_available):
     Output("btn-mode-ai", "disabled"),
     Input("current-mode", "data"),
     Input("ai-data-available", "data"),
-    prevent_initial_call=False
+    prevent_initial_call='initial_duplicate'
 )
 def update_button_styles(mode, ai_available):
     """
