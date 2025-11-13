@@ -825,7 +825,7 @@ def is_pii(col: str) -> bool:
     if c == "respondent_id": return False
     patterns = [
         r"\bcpf\b", r"\bcnpj\b", r"\brg\b", r"\bdoc", r"document", r"\bpassport\b", r"e[-_ ]?mail",
-        r"\bemail\b", r"\btelefone\b", r"\bphone\b", r"\bcelular\b", r"\bwhatsapp\b", r"\bendere",
+        r"\bemail\b", r"\btelefone\b", r"phone", r"\bcelular\b", r"\bwhatsapp\b", r"\bendere",
         r"\baddress\b", r"\bcep\b", r"\bzipcode\b", r"\bnome\b", r"\bname\b", r"\bid\b", r"\bip\b",
         r"lat", r"lon", r"longitude", r"latitude", r"device", r"imei",
         r"sobrenome", r"lastname", r"surname", r"first[-_ ]?name", r"given[-_ ]?name",
@@ -2139,8 +2139,8 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
                     "Contagem": vc.values,
                     "Percentual": (vc.values / n_responses * 100).round(1)
                 })
-                # Texto mostra contagem + percentual
-                df_bar["Texto"] = df_bar.apply(lambda row: f"{int(row['Contagem'])} ({row['Percentual']}%)", axis=1)
+                # Texto mostra apenas percentual
+                df_bar["Texto"] = df_bar.apply(lambda row: f"{row['Percentual']}%", axis=1)
 
                 fig = px.bar(df_bar, x="Resposta", y="Contagem")
                 fig.update_traces(
@@ -2174,19 +2174,19 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
                         dbc.Row([
                             dbc.Col([
                                 html.Div([
-                                    html.Strong(f"{n_responses}", style={"fontSize": "2rem"}),
+                                    html.Div(f"{n_responses}", style={"fontSize": "2rem", "color": "#333"}),
                                     html.Div("Respostas", className="text-muted"),
                                 ], className="text-center mb-2"),
                             ], width=4),
                             dbc.Col([
                                 html.Div([
-                                    html.Strong(f"{n_unique}", style={"fontSize": "2rem"}),
+                                    html.Div(f"{n_unique}", style={"fontSize": "2rem", "color": "#333"}),
                                     html.Div("Respostas únicas", className="text-muted"),
                                 ], className="text-center mb-2"),
                             ], width=4),
                             dbc.Col([
                                 html.Div([
-                                    html.Strong(f"{(n_responses/total_responses*100):.1f}%", style={"fontSize": "2rem"}),
+                                    html.Div(f"{(n_responses/total_responses*100):.1f}%", style={"fontSize": "2rem", "color": "#333"}),
                                     html.Div("Taxa de resposta", className="text-muted"),
                                 ], className="text-center mb-2"),
                             ], width=4),
@@ -2195,7 +2195,7 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
                         html.Details([
                             html.Summary("Ver todas as respostas", style={"cursor": "pointer", "color": "#0066cc"}),
                             html.Div([
-                                html.P(f"{val} ({cnt}x)", className="mb-1")
+                                html.P(f"{val} ({cnt})", className="mb-1")
                                 for val, cnt in answers.value_counts().items()
                             ], style={"maxHeight": "300px", "overflowY": "auto", "marginTop": "10px"})
                         ]),
