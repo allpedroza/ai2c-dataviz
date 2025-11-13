@@ -1635,7 +1635,8 @@ def pivot_controls(df: pd.DataFrame, state: Dict, mode: str = "processed"):
         ai_generated_cols = ["sentiment", "category", "topic", "intention", "confidence_level", "orig_answer"]
         dims_base = [c for c in (state.get("ALLOWED_SEGMENT_COLS") or []) if c not in ai_generated_cols]
 
-    dims = sorted(list(set([c for c in dims_base if c not in numeric_cols])))
+    # Remove colunas PII das dimensões disponíveis
+    dims = sorted(list(set([c for c in dims_base if c not in numeric_cols and not is_pii(c)])))
     dims_options = [{"label": c, "value": c} for c in dims] + [
         {"label": "Resposta (da pergunta selecionada)", "value": "__pv_answer__"}
     ]
