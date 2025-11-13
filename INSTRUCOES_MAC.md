@@ -95,6 +95,41 @@ No terminal onde o servidor está rodando, pressione:
 Ctrl + C
 ```
 
+## 🎛️ Dois Modos de Visualização
+
+A aplicação agora oferece **dois modos complementares**:
+
+### 📊 Modo "Dados Processados" (Padrão)
+Visualize dados enriquecidos com análises automáticas de IA:
+- **Categorias** - Agrupamentos automáticos de respostas similares
+- **Sentimentos** - Análise de polaridade (Positivo, Negativo, Neutro)
+- **Intenções** - Identificação do objetivo por trás de cada resposta
+- **Tópicos** - Temas principais extraídos das respostas
+- **Confidence Level** - Nível de confiança de cada análise
+
+**Arquivo usado:** `{key}_analytics_cube.csv`
+
+### 📋 Modo "Pesquisa" (Novo)
+Visualize respostas brutas com estatísticas descritivas:
+- **Total de respostas** por pergunta
+- **Respostas únicas** - Quantas variações existem
+- **Taxa de resposta** - Percentual de respondentes
+- **Distribuição** - Gráfico top 10 respostas mais comuns
+- **Lista completa** - Todas as respostas em formato expansível
+
+**Arquivo usado:** `{key}-answers.csv`
+
+### Como Alternar Entre Modos
+
+No topo da página, você verá um toggle:
+
+```
+[📊 Dados Processados]  [📋 Pesquisa (Respostas Brutas)]
+```
+
+Clique em qualquer botão para alternar. A descrição abaixo do toggle
+e todo o conteúdo da página será atualizado automaticamente.
+
 ## 🎯 Testando com Seus Próprios Dados
 
 ### Para criar uma nova pesquisa local:
