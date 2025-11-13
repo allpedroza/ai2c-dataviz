@@ -254,12 +254,19 @@ def s3_path_for_key(env_resolved: str, key: str) -> str:
 
 def _s3_download_to_tmp(env_resolved: str, key: str) -> Optional[str]:
     """Baixa s3://.../{key}_analytics_cube.csv p/ /tmp e retorna caminho local, ou None se falhar."""
-    s3_uri = s3_path_for_key(env_resolved, key)
-    _, _, rest = s3_uri.partition("s3://")
-    bucket, _, keypath = rest.partition("/")
     local_dir = os.getenv("DATA_DIR", "/tmp")
     os.makedirs(local_dir, exist_ok=True)
     local_path = os.path.join(local_dir, f"{key}_analytics_cube.csv")
+
+    # Se DATA_DIR está configurado E o arquivo existe localmente, usar ele diretamente
+    if os.getenv("DATA_DIR") and os.path.exists(local_path):
+        print(f"[LOCAL] Usando arquivo local: {local_path}")
+        return local_path
+
+    # Caso contrário, tentar baixar do S3
+    s3_uri = s3_path_for_key(env_resolved, key)
+    _, _, rest = s3_uri.partition("s3://")
+    bucket, _, keypath = rest.partition("/")
     s3 = boto3.client("s3", region_name=AWS_REGION)
     try:
         print(f"[S3] Baixando {s3_uri} para {local_path}")
@@ -732,14 +739,19 @@ RAW_DF_CACHE: Dict[Tuple[str, str], pd.DataFrame] = {}
 
 def _s3_download_answers_to_tmp(env_resolved: str, key: str) -> Optional[str]:
     """Baixa s3://.../{key}-answers.csv para /tmp e retorna caminho local, ou None se falhar."""
-    env_bucket = resolve_bucket(env_resolved)
-    base_bucket = S3_BUCKET_BASE
-    s3_key = f"{S3_INPUTS_PREFIX}/{key}-answers.csv"
-
     local_dir = os.getenv("DATA_DIR", "/tmp")
     os.makedirs(local_dir, exist_ok=True)
     local_path = os.path.join(local_dir, f"{key}-answers.csv")
 
+    # Se DATA_DIR está configurado E o arquivo existe localmente, usar ele diretamente
+    if os.getenv("DATA_DIR") and os.path.exists(local_path):
+        print(f"[LOCAL] Usando arquivo local: {local_path}")
+        return local_path
+
+    # Caso contrário, tentar baixar do S3
+    env_bucket = resolve_bucket(env_resolved)
+    base_bucket = S3_BUCKET_BASE
+    s3_key = f"{S3_INPUTS_PREFIX}/{key}-answers.csv"
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
     # Tenta primeiro no bucket do ambiente, depois no base
