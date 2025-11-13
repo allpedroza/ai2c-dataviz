@@ -762,6 +762,53 @@ def load_df_for_key(env_resolved: str, key: str) -> pd.DataFrame:
     DF_CACHE[k] = df
     return df
 
+# Cache para DataFrames RAW (answers)
+RAW_ANSWERS_CACHE: Dict[Tuple[str, str], pd.DataFrame] = {}
+
+def load_raw_answers_for_key(env_resolved: str, key: str) -> pd.DataFrame:
+    """Carrega DF do arquivo ANSWERS (respostas brutas) para (env, key)."""
+    k = (env_resolved, key, "raw")
+    if k in RAW_ANSWERS_CACHE:
+        return RAW_ANSWERS_CACHE[k]
+
+    # Tenta carregar answers no modo local
+    if LOCAL_MODE:
+        local_candidates = [
+            os.path.join(LOCAL_DATA_DIR, f"{key}-answers.csv"),
+            f"{key}-answers.csv",  # raiz do projeto
+        ]
+        for local_path in local_candidates:
+            if os.path.exists(local_path):
+                print(f"[LOCAL] Carregando answers de {local_path}")
+                df = read_csv_robust(local_path)
+                RAW_ANSWERS_CACHE[k] = df
+                return df
+        print(f"[LOCAL] Arquivo answers não encontrado para key={key}")
+        raise FileNotFoundError(f"Arquivo answers não encontrado para key='{key}' no modo local")
+
+    # Modo S3: tenta baixar do S3
+    env_bucket = resolve_bucket(env_resolved)
+    base_bucket = S3_BUCKET_BASE
+    s3_key = f"{S3_INPUTS_PREFIX}/{key}-answers.csv"
+
+    for bucket in (env_bucket, base_bucket):
+        txt = _s3_read_text(bucket, s3_key)
+        if txt:
+            # Salva temporariamente e lê
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as f:
+                f.write(txt)
+                temp_path = f.name
+
+            df = read_csv_robust(temp_path)
+            os.unlink(temp_path)
+
+            RAW_ANSWERS_CACHE[k] = df
+            print(f"[S3] Answers carregado de s3://{bucket}/{s3_key}: {len(df)} linhas")
+            return df
+
+    raise FileNotFoundError(f"Arquivo answers não encontrado para key='{key}' no ambiente='{env_resolved}'")
+
 # ==============================
 # 5) Funções de Análise e Helpers
 # ==============================
@@ -1240,11 +1287,35 @@ modal_drill = dbc.Modal([
     dbc.ModalBody(id="pv-drill-content"),
 ], id="pv-drill-modal", size="xl", is_open=False)
 
+# Toggle de modo: Dados Processados vs Pesquisa
+mode_selector = dbc.Card([
+    dbc.CardBody([
+        html.Div([
+            html.Label("Modo de Visualização:", className="fw-bold me-3"),
+            dbc.RadioItems(
+                id="view-mode",
+                className="btn-group",
+                inputClassName="btn-check",
+                labelClassName="btn btn-outline-primary",
+                labelCheckedClassName="active",
+                options=[
+                    {"label": "📊 Dados Processados", "value": "processed"},
+                    {"label": "📋 Pesquisa (Respostas Brutas)", "value": "survey"},
+                ],
+                value="processed",
+            ),
+        ], className="d-flex align-items-center"),
+        html.Div(id="mode-description", className="mt-2 text-muted", style={"fontSize": "0.9rem"}),
+    ], className="py-2")
+], className="mb-3")
+
 app.layout = dbc.Container([
     header,
     dcc.Location(id="url", refresh=False),
     dcc.Store(id="current-env"),
     dcc.Store(id="current-key"),
+    dcc.Store(id="current-mode", data="processed"),
+    mode_selector,
     tabs,
     html.Div(id="tab-content", className="mt-3"),
 ], fluid=True)
@@ -1564,6 +1635,26 @@ def set_current_key(search):
         key = (qs.get("key", [default_key]) or [default_key])[0]
     return key
 
+@dash.callback(
+    Output("current-mode", "data"),
+    Input("view-mode", "value"),
+    prevent_initial_call=False
+)
+def set_current_mode(mode_value):
+    return mode_value or "processed"
+
+@dash.callback(
+    Output("mode-description", "children"),
+    Input("view-mode", "value"),
+    prevent_initial_call=False
+)
+def update_mode_description(mode):
+    if mode == "processed":
+        return "Visualize dados enriquecidos com análises de IA: categorias, sentimentos, intenções e tópicos."
+    elif mode == "survey":
+        return "Visualize respostas brutas da pesquisa com estatísticas descritivas e distribuições por pergunta."
+    return ""
+
 
 # ==============================
 # 10) Callbacks – Pivot principal
@@ -1770,18 +1861,182 @@ def sync_dim_filter_values(dim_col, pv_qid, pv_use_answer, pv_bins, ds, de, key,
 # ==============================
 # 11) Renderização das Abas
 # ==============================
+
+def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str, key: str):
+    """Renderiza visualização para modo SURVEY (respostas brutas)."""
+
+    # Identifica colunas de metadados vs perguntas
+    meta_cols = ["updatedAt", "label", "name", "lastName", "email", "phoneNumber", "cdc", "allowEnterpriseToContact"]
+    question_cols = [c for c in df_raw.columns if c not in meta_cols]
+
+    # Estatísticas gerais
+    total_responses = len(df_raw)
+    total_questions = len(question_cols)
+
+    if active_tab == "questions" or active_tab is None:
+        # Cria cards descritivos para cada pergunta
+        cards = []
+        for qcol in question_cols:
+            # Remove valores vazios
+            answers = df_raw[qcol].dropna().astype(str)
+            answers = answers[answers.str.strip() != ""]
+
+            n_responses = len(answers)
+            n_unique = answers.nunique()
+
+            # Calcula distribuição
+            vc = answers.value_counts().head(10)
+
+            # Cria gráfico de barras simples
+            if not vc.empty:
+                df_bar = pd.DataFrame({"Resposta": vc.index.astype(str), "Contagem": vc.values})
+                fig = px.bar(df_bar, x="Resposta", y="Contagem", title=f"Top 10 respostas")
+                fig.update_traces(text=df_bar["Contagem"], textposition="outside")
+                fig.update_layout(
+                    xaxis_title="",
+                    yaxis_title="Qtde",
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=40, b=10)
+                )
+                # Rotaciona labels se tiverem mais de 20 caracteres
+                max_len = df_bar["Resposta"].str.len().max()
+                if max_len > 20:
+                    fig.update_xaxes(tickangle=-45)
+            else:
+                fig = go.Figure()
+
+            # Card da pergunta
+            card = dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Strong(qcol, style={"fontSize": "1.1rem"}),
+                    ]),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Div([
+                                    html.Strong(f"{n_responses}", style={"fontSize": "2rem"}),
+                                    html.Div("Respostas", className="text-muted"),
+                                ], className="text-center mb-2"),
+                            ], width=4),
+                            dbc.Col([
+                                html.Div([
+                                    html.Strong(f"{n_unique}", style={"fontSize": "2rem"}),
+                                    html.Div("Respostas únicas", className="text-muted"),
+                                ], className="text-center mb-2"),
+                            ], width=4),
+                            dbc.Col([
+                                html.Div([
+                                    html.Strong(f"{(n_responses/total_responses*100):.1f}%", style={"fontSize": "2rem"}),
+                                    html.Div("Taxa de resposta", className="text-muted"),
+                                ], className="text-center mb-2"),
+                            ], width=4),
+                        ], className="mb-3"),
+                        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+                        html.Details([
+                            html.Summary("Ver todas as respostas", style={"cursor": "pointer", "color": "#0066cc"}),
+                            html.Div([
+                                html.P(f"{val} ({cnt}x)", className="mb-1")
+                                for val, cnt in answers.value_counts().items()
+                            ], style={"maxHeight": "300px", "overflowY": "auto", "marginTop": "10px"})
+                        ]),
+                    ]),
+                ])
+            ], width=12, lg=6, className="mb-3")
+
+            cards.append(card)
+
+        # Header com resumo
+        header = dbc.Card([
+            dbc.CardBody([
+                html.H4("📋 Resumo da Pesquisa", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Strong(f"{total_responses}", style={"fontSize": "2.5rem", "color": "#0066cc"}),
+                            html.Div("Total de respostas", className="text-muted"),
+                        ], className="text-center"),
+                    ], width=4),
+                    dbc.Col([
+                        html.Div([
+                            html.Strong(f"{total_questions}", style={"fontSize": "2.5rem", "color": "#28a745"}),
+                            html.Div("Perguntas na pesquisa", className="text-muted"),
+                        ], className="text-center"),
+                    ], width=4),
+                    dbc.Col([
+                        html.Div([
+                            html.Strong(f"{df_raw['updatedAt'].nunique() if 'updatedAt' in df_raw.columns else 'N/A'}",
+                                      style={"fontSize": "2.5rem", "color": "#ffc107"}),
+                            html.Div("Períodos únicos", className="text-muted"),
+                        ], className="text-center"),
+                    ], width=4),
+                ]),
+            ])
+        ], className="mb-4")
+
+        return html.Div([header, dbc.Row(cards)])
+
+    elif active_tab == "raw":
+        # Mostra tabela completa de respostas brutas
+        return html.Div([
+            html.H5("📋 Dados Brutos da Pesquisa"),
+            html.P(f"{total_responses} respostas × {total_questions} perguntas"),
+            html.Div(
+                dbc.Table.from_dataframe(
+                    df_raw.head(100),
+                    striped=True,
+                    bordered=True,
+                    hover=True,
+                    size="sm",
+                    style={"fontSize": "0.85rem"}
+                ),
+                style={"maxHeight": "600px", "overflowY": "auto"}
+            ),
+            html.P(f"Mostrando primeiras 100 de {total_responses} respostas.", className="text-muted mt-2") if total_responses > 100 else html.Div(),
+        ])
+
+    elif active_tab == "pivot":
+        return html.Div([
+            html.H4("Análises personalizadas", className="mb-3"),
+            html.P("Análises personalizadas não disponíveis no modo Pesquisa.", className="text-muted"),
+            html.P("Alterne para 'Dados Processados' para acessar esta funcionalidade.", className="text-muted"),
+        ], className="alert alert-info")
+
+    return html.Div("Selecione uma aba.", className="text-muted")
+
 @dash.callback(
     Output("tab-content", "children"),
     Input("main-tabs", "active_tab"),
     Input("current-key", "data"),
     Input("current-env", "data"),
+    Input("current-mode", "data"),
     prevent_initial_call=False
 )
-def render_tab(active, key, env_resolved):
+def render_tab(active, key, env_resolved, mode):
     try:
         key = key or os.getenv("KEY", "")
         env_resolved = normalize_env(env_resolved or "dev")
+        mode = mode or "processed"
 
+        # MODO SURVEY: Carrega answers (respostas brutas)
+        if mode == "survey":
+            try:
+                df_raw = load_raw_answers_for_key(env_resolved, key) if key else pd.DataFrame()
+            except Exception as e:
+                msg = f"Arquivo answers não disponível para env={env_resolved} key={key}: {e}"
+                print("[render_tab survey]", msg)
+                return html.Div([
+                    html.H4("Modo Pesquisa não disponível", className="text-warning"),
+                    html.P(msg),
+                    html.P("Certifique-se de que o arquivo *-answers.csv existe no S3 ou localmente."),
+                ], className="alert alert-warning")
+
+            if df_raw.empty:
+                return html.Div("Nenhuma resposta encontrada no arquivo answers.", className="alert alert-warning")
+
+            return render_survey_view(df_raw, active, env_resolved, key)
+
+        # MODO PROCESSED (original): Carrega analytics_cube
         try:
             df = load_df_for_key(env_resolved, key) if key else pd.DataFrame()
         except Exception as e:
