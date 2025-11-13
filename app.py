@@ -1,7 +1,9 @@
 import os, re, csv, glob, argparse, warnings
 from typing import List, Optional, Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
+import time
+import requests
 
 warnings.filterwarnings("ignore")
 
@@ -722,6 +724,9 @@ def load_df_for_key(env_resolved: str, key: str) -> pd.DataFrame:
     if k in DF_CACHE:
         return DF_CACHE[k]
 
+    # Garante que os dados estejam atualizados antes de baixar
+    ensure_fresh_data(env_resolved, key)
+
     local_path = _s3_download_to_tmp(env_resolved, key)
     if not local_path or not os.path.exists(local_path):
         fallback_path = f"{key}_analytics_cube.csv"
@@ -771,6 +776,9 @@ def load_raw_answers_for_key(env_resolved: str, key: str) -> pd.DataFrame:
     if k in RAW_ANSWERS_CACHE:
         return RAW_ANSWERS_CACHE[k]
 
+    # Garante que os dados estejam atualizados antes de baixar
+    ensure_fresh_data(env_resolved, key)
+
     # Tenta carregar answers no modo local
     if LOCAL_MODE:
         local_candidates = [
@@ -819,9 +827,135 @@ def is_pii(col: str) -> bool:
         r"\bcpf\b", r"\bcnpj\b", r"\brg\b", r"\bdoc", r"document", r"\bpassport\b", r"e[-_ ]?mail",
         r"\bemail\b", r"\btelefone\b", r"\bphone\b", r"\bcelular\b", r"\bwhatsapp\b", r"\bendere",
         r"\baddress\b", r"\bcep\b", r"\bzipcode\b", r"\bnome\b", r"\bname\b", r"\bid\b", r"\bip\b",
-        r"lat", r"lon", r"longitude", r"latitude", r"device", r"imei"
+        r"lat", r"lon", r"longitude", r"latitude", r"device", r"imei",
+        r"sobrenome", r"lastname", r"surname", r"first[-_ ]?name", r"given[-_ ]?name",
+        r"label"  # label costuma ser nome/identificador pessoal
     ]
     return any(re.search(p, c) for p in patterns)
+
+# ==============================
+# API Integration: Autenticação e Sync
+# ==============================
+
+# Cache do token de autenticação (evita login repetido)
+_API_TOKEN_CACHE = {"token": None, "expires_at": 0}
+
+def authenticate_api() -> Optional[str]:
+    """Autentica na API ai2c.tech e retorna token Bearer."""
+    # Verifica se token em cache ainda é válido (válido por 1 hora)
+    if _API_TOKEN_CACHE["token"] and time.time() < _API_TOKEN_CACHE["expires_at"]:
+        return _API_TOKEN_CACHE["token"]
+
+    email = os.getenv("API_EMAIL")
+    password = os.getenv("API_PASSWORD")
+
+    if not email or not password:
+        print("[API] Credenciais não configuradas (API_EMAIL/API_PASSWORD)")
+        return None
+
+    try:
+        response = requests.post(
+            "https://api.ai2c.tech/auth/signIn",
+            json={"email": email, "password": password},
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        token_type = data.get("tokenType", "Bearer")
+        access_token = data.get("accessToken")
+
+        if not access_token:
+            print("[API] Login falhou: accessToken não retornado")
+            return None
+
+        # Armazena no cache (válido por 1 hora)
+        full_token = f"{token_type} {access_token}"
+        _API_TOKEN_CACHE["token"] = full_token
+        _API_TOKEN_CACHE["expires_at"] = time.time() + 3600  # 1 hora
+
+        print(f"[API] Login bem-sucedido como {email}")
+        return full_token
+
+    except Exception as e:
+        print(f"[API] Erro ao autenticar: {e}")
+        return None
+
+def sync_questionnaire_data(questionnaire_id: str) -> bool:
+    """Solicita sincronização de dados do questionário no S3."""
+    token = authenticate_api()
+    if not token:
+        print("[API] Não foi possível autenticar para sync")
+        return False
+
+    try:
+        response = requests.post(
+            f"https://api.ai2c.tech/questionnaires/syncAi/{questionnaire_id}",
+            headers={"Authorization": token},
+            timeout=30
+        )
+        response.raise_for_status()
+        print(f"[API] Sync solicitado com sucesso para {questionnaire_id}")
+        return True
+
+    except Exception as e:
+        print(f"[API] Erro ao solicitar sync: {e}")
+        return False
+
+def get_s3_file_last_modified(bucket: str, s3_key: str) -> Optional[datetime]:
+    """Retorna timestamp de última modificação do arquivo no S3."""
+    try:
+        s3 = boto3.client("s3")
+        response = s3.head_object(Bucket=bucket, Key=s3_key)
+        return response["LastModified"]
+    except Exception as e:
+        print(f"[S3] Erro ao verificar timestamp de {s3_key}: {e}")
+        return None
+
+def should_sync_data(env_resolved: str, key: str, max_age_minutes: int = 5) -> bool:
+    """Verifica se os dados precisam ser sincronizados (arquivo > max_age_minutes)."""
+    # Modo local não precisa de sync
+    if LOCAL_MODE:
+        return False
+
+    bucket = f"ai2c-genai-{env_resolved}"
+    s3_key = f"ai2c-reports/reports/{key}/{key}_analytics_cube.csv"
+
+    last_modified = get_s3_file_last_modified(bucket, s3_key)
+    if not last_modified:
+        # Arquivo não existe ou erro - tenta sync
+        return True
+
+    # Remove timezone awareness para comparação
+    if last_modified.tzinfo:
+        last_modified = last_modified.replace(tzinfo=None)
+
+    age = datetime.utcnow() - last_modified
+    needs_sync = age > timedelta(minutes=max_age_minutes)
+
+    if needs_sync:
+        print(f"[SYNC] Arquivo tem {age.total_seconds()/60:.1f} minutos. Sync necessário.")
+    else:
+        print(f"[SYNC] Arquivo tem {age.total_seconds()/60:.1f} minutos. Ainda está fresco.")
+
+    return needs_sync
+
+def ensure_fresh_data(env_resolved: str, key: str) -> None:
+    """Garante que os dados estejam atualizados, fazendo sync se necessário."""
+    # Obtém questionnaire_id a partir da key ou env var
+    # Por padrão, usa a própria key como questionnaire_id
+    questionnaire_id = os.getenv("QUESTIONNAIRE_ID", key)
+
+    if should_sync_data(env_resolved, key):
+        print(f"[SYNC] Iniciando sync para {questionnaire_id}...")
+        if sync_questionnaire_data(questionnaire_id):
+            # Aguarda alguns segundos para o sync processar
+            print("[SYNC] Aguardando processamento...")
+            time.sleep(5)
+        else:
+            print("[SYNC] Falha ao sincronizar. Usando dados existentes.")
+    else:
+        print(f"[SYNC] Dados já estão atualizados para {key}")
 
 def intents_by_question(df_cube, qid: str):
     sub = df_cube[df_cube['question_id'] == qid]
@@ -2070,44 +2204,21 @@ def render_survey_view(df_raw: pd.DataFrame, active_tab: str, env_resolved: str,
 
             cards.append(card)
 
-        # Header com resumo
-        header = dbc.Card([
-            dbc.CardBody([
-                html.H4("📋 Resumo da Pesquisa", className="mb-3"),
-                dbc.Row([
-                    dbc.Col([
-                        html.Div([
-                            html.Strong(f"{total_responses}", style={"fontSize": "2.5rem", "color": "#0066cc"}),
-                            html.Div("Total de respostas", className="text-muted"),
-                        ], className="text-center"),
-                    ], width=4),
-                    dbc.Col([
-                        html.Div([
-                            html.Strong(f"{total_questions}", style={"fontSize": "2.5rem", "color": "#28a745"}),
-                            html.Div("Perguntas na pesquisa", className="text-muted"),
-                        ], className="text-center"),
-                    ], width=4),
-                    dbc.Col([
-                        html.Div([
-                            html.Strong(f"{df_raw['updatedAt'].nunique() if 'updatedAt' in df_raw.columns else 'N/A'}",
-                                      style={"fontSize": "2.5rem", "color": "#ffc107"}),
-                            html.Div("Períodos únicos", className="text-muted"),
-                        ], className="text-center"),
-                    ], width=4),
-                ]),
-            ])
-        ], className="mb-4")
-
-        return html.Div([header, dbc.Row(cards)])
+        # Retorna apenas os cards das perguntas (sem resumo geral)
+        return dbc.Row(cards)
 
     elif active_tab == "raw":
-        # Mostra tabela completa de respostas brutas
+        # Mostra tabela completa de respostas brutas (SEM colunas PII)
+        # Filtra colunas que contêm informações pessoais
+        safe_cols = [c for c in df_raw.columns if not is_pii(c)]
+        df_display = df_raw[safe_cols] if safe_cols else df_raw.head(0)
+
         return html.Div([
             html.H5("📋 Dados Brutos da Pesquisa"),
-            html.P(f"{total_responses} respostas × {total_questions} perguntas"),
+            html.P(f"{total_responses} respostas × {len(safe_cols)} colunas (colunas com PII removidas)"),
             html.Div(
                 dbc.Table.from_dataframe(
-                    df_raw.head(100),
+                    df_display.head(100),
                     striped=True,
                     bordered=True,
                     hover=True,
