@@ -1,0 +1,5 @@
+"topic";"questionnaire_id";"survey_id";"question_id";"question_description";"question_type";"answer_options";"marked"
+"";"employee-survey-demo";"";"pergunta1";"Você conhece o nosso serviço de recebimento da fatura por e-mail (fatura digital)?";"multiple-choice";"Sim|Não";"1"
+"";"employee-survey-demo";"";"pergunta2";"Qual o principal motivo para você preferir receber sua fatura impressa em papel e não por e-mail?";"open-ended";"";"1"
+"";"employee-survey-demo";"";"pergunta3";"Quais os motivos que te impedem de mudar para o recebimento da fatura digital por e-mail?";"open-ended";"";"1"
+"";"employee-survey-demo";"";"pergunta4";"O que faria você se sentir seguro(a) e motivado(a) a aderir à fatura digital por e-mail?";"open-ended";"";"1"
